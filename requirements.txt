@@ -1,0 +1,11 @@
+streamlit
+openai
+pinecone
+pillow
+numpy
+requests
+langchain
+langchain-openai
+langchain-community
+langchain-pinecone
+faiss-cpu
