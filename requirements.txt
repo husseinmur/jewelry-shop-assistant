@@ -9,3 +9,4 @@ langchain-openai
 langchain-community
 langchain-pinecone
 faiss-cpu
+rank_bm25
