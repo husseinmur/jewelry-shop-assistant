@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from shared.config import init_apis, TEXT_MODEL
 from shared.database import search_by_text, search_by_image, smart_search
-from shared.embeddings import get_image_description, get_image_category
+from shared.embeddings import get_image_description
 import openai
 
 # Page config
@@ -46,16 +46,24 @@ def get_chatbot_response(user_message, search_results=None, image_analysis=None)
         # Build strict RAG system message
         if search_results and len(search_results) > 0:
             # RAG mode: Only use database knowledge
-            system_message = """أنت مساعد مبيعات لمتجر مجوهرات. يجب عليك الالتزام بالقواعد التالية بدقة:
+            system_message = """أنت مساعد مبيعات ودود ومرحب في متجر مجوهرات! 💎
 
-            🚨 قواعد صارمة:
+            شخصيتك:
+            - مرحب وودود جداً مع كل عميل
+            - متحمس لمساعدة العملاء في العثور على أجمل القطع
+            - تستخدم لغة دافئة ومحببة
+            - تبدي اهتماماً حقيقياً بإسعاد العميل
+
+            🌟 قواعد مهمة:
             1. استخدم فقط المعلومات المتوفرة في قاعدة بيانات المتجر أدناه
             2. لا تخترع أو تضيف معلومات من معرفتك العامة
-            3. إذا لم تجد معلومة في قاعدة البيانات، قل "لا تتوفر هذه المعلومة في مخزوننا الحالي"
-            4. اربط إجابتك دائماً بالمنتجات الموجودة في المتجر
-            5. لا تقدم نصائح عامة - فقط ما يتعلق بمنتجاتنا
+            3. إذا لم تجد معلومة في قاعدة البيانات، قل "للأسف هذه المعلومة غير متوفرة حالياً" بطريقة ودودة
+            4. اربط إجابتك دائماً بالمنتجات الموجودة في المتجر بحماس
+            5. تأكد من إدراج الرابط إذا كان متوفراً للمنتج
+            6. ابدأ بترحيب دافئ واختتم بعرض مساعدة إضافية
+            7. استخدم عبارات مثل "يسعدني أن أساعدك" و "أتمنى أن تنال إعجابك"
 
-            تحدث باللغة العربية وكن مفيداً ومهنياً."""
+            تحدث باللغة العربية بأسلوب ودود ومتحمس!"""
 
             # Add product database
             products_info = "🏪 قاعدة بيانات منتجات المتجر:\n\n"
@@ -72,24 +80,35 @@ def get_chatbot_response(user_message, search_results=None, image_analysis=None)
                     products_info += f"- التصميم: {metadata.get('design')}\n"
                 if metadata.get('style'):
                     products_info += f"- الستايل: {metadata.get('style')}\n"
+                if metadata.get('product_url'):
+                    products_info += f"- الرابط: {metadata.get('product_url')}\n"
                 products_info += f"- الوصف: {metadata.get('description', '')}\n"
                 products_info += f"- مدى التطابق مع البحث: {result.score * 100:.1f}%\n\n"
 
-            products_info += "\n⚠️ هذه هي المعلومات الوحيدة المتاحة. لا تضيف معلومات أخرى."
+            products_info += "\n💫 هذه هي مجموعة منتجاتنا الرائعة المتطابقة مع طلبك. استخدم هذه المعلومات فقط وكن متحمساً في عرضها!"
 
         else:
             # No products found or general question
-            system_message = """أنت مساعد مبيعات لمتجر مجوهرات.
+            system_message = """أنت مساعد مبيعات ودود ومتحمس في متجر مجوهرات! 💎
 
-            🚨 قواعد صارمة:
-            1. لا يوجد منتجات متطابقة مع طلب العميل في مخزوننا الحالي
-            2. لا تقترح منتجات غير موجودة في متجرنا
-            3. اعتذر بأدب وانصح العميل بالبحث بمصطلحات مختلفة
-            4. يمكنك تقديم نصائح عامة فقط حول أنواع المجوهرات والعناية بها
-            5. شجع العميل على تصفح منتجاتنا الأخرى
+            الموقف الحالي:
+            - لم نجد منتجات تطابق تماماً طلب العميل في مجموعتنا الحالية
+            - أو أن العميل يطرح سؤالاً عاماً عن المجوهرات
 
-            تحدث باللغة العربية وكن مفيداً ومهنياً."""
-            products_info = "⚠️ لم يتم العثور على منتجات مطابقة في مخزوننا الحالي."
+            شخصيتك الودودة:
+            - اعتذر بلطف ودود عن عدم وجود المنتج المحدد
+            - أظهر تفهماً واهتماماً بحاجة العميل
+            - اقترح بدائل أو طرق بحث مختلفة بحماس
+            - قدم نصائح مفيدة حول المجوهرات والعناية بها
+            - شجع العميل على تصفح منتجاتنا الرائعة الأخرى
+
+            🌟 أسلوبك:
+            - استخدم عبارات مثل "يسعدني مساعدتك" و "أتفهم تماماً ما تبحث عنه"
+            - كن متفائلاً ومشجعاً
+            - اختتم بعرض مساعدة إضافية
+
+            تحدث بالعربية بأسلوب دافئ ومرحب!"""
+            products_info = "💝 هذه فرصة رائعة لتقديم المساعدة والنصائح حول المجوهرات بأسلوب ودود!"
 
         messages = [
             {"role": "system", "content": system_message},
@@ -156,9 +175,9 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-        # Display products if included in message
-        if message["role"] == "assistant" and "products" in message:
-            display_products(message["products"])
+        # Product cards disabled - all info in conversational text
+        # if message["role"] == "assistant" and "products" in message:
+        #     display_products(message["products"])
 
 # Image upload section
 st.markdown("### 📸 رفع صورة (اختياري)")
@@ -176,13 +195,12 @@ if uploaded_image:
         with st.spinner("تحليل الصورة..."):
             # Analyze the image
             description = get_image_description(image)
-            category = get_image_category(image)
 
             # Search for similar products
             search_results = search_by_image(pinecone_index, image, top_k=5)
 
             # Generate chatbot response
-            analysis_text = f"هذه قطعة مجوهرات من فئة: {category}\n\nالوصف: {description}"
+            analysis_text = f"وصف القطعة: {description}"
             bot_response, _ = get_chatbot_response(
                 "حلل هذه الصورة واعطني معلومات عنها",
                 search_results=search_results,
@@ -196,8 +214,9 @@ if uploaded_image:
             })
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": bot_response,
-                "products": search_results if search_results else None
+                "content": bot_response
+                # Product cards disabled - not storing products
+                # "products": search_results if search_results else None
             })
 
             st.rerun()
@@ -229,8 +248,9 @@ if prompt := st.chat_input("اكتب رسالتك هنا..."):
         "role": "assistant",
         "content": response
     }
-    if search_results:
-        assistant_message["products"] = search_results
+    # Product cards disabled - not storing products in messages
+    # if search_results:
+    #     assistant_message["products"] = search_results
 
     st.session_state.messages.append(assistant_message)
 

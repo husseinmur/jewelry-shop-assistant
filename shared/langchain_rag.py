@@ -109,6 +109,7 @@ class ArabicJewelryRAG:
                         "weight": metadata.get("weight", 0),
                         "design": metadata.get("design", ""),
                         "style": metadata.get("style", ""),
+                        "product_url": metadata.get("product_url", ""),
                         "score": getattr(match, 'score', 0)
                     }
                 )
@@ -182,6 +183,7 @@ class ArabicJewelryRAG:
                         'weight': doc.metadata.get('weight', 0),
                         'design': doc.metadata.get('design', ''),
                         'style': doc.metadata.get('style', ''),
+                        'product_url': doc.metadata.get('product_url', ''),
                         'description': doc.page_content
                     }
                 }
@@ -230,30 +232,56 @@ class ArabicJewelryRAG:
             # Create context from search results
             context = self._create_context_from_results(search_results)
 
+            # Build conversation context
+            conversation_context = ""
+            if conversation_history:
+                recent_messages = conversation_history[-4:] if len(conversation_history) > 4 else conversation_history
+                for msg in recent_messages:
+                    if msg.get("role") in ["user", "assistant"]:
+                        content = msg.get("content", "")[:150]  # Limit length
+                        conversation_context += f"{msg['role']}: {content}\n"
+
             # Create conversational prompt
             prompt = ChatPromptTemplate.from_template("""
-أنت مساعد مبيعات خبير في متجر مجوهرات. استخدم فقط المعلومات المتوفرة في قاعدة البيانات أدناه للإجابة على سؤال العميل.
+أنت مساعد مبيعات ودود ومتحمس في متجر مجوهرات! 💎
+تحب مساعدة العملاء في العثور على أجمل القطع التي تناسبهم.
+
+{history_section}
 
 قاعدة بيانات المنتجات:
 {context}
 
+شخصيتك وأسلوبك:
+- مرحب وودود في جميع الأوقات
+- متحمس لعرض المنتجات الجميلة
+- تستخدم عبارات دافئة ومشجعة
+- تهتم حقاً بإسعاد العميل
+- تحافظ على استمرارية المحادثة
+
 قواعد مهمة:
 1. استخدم فقط المعلومات الموجودة في قاعدة البيانات أعلاه
 2. لا تخترع أو تضيف معلومات غير موجودة
-3. إذا لم تجد معلومة محددة، قل "هذه المعلومة غير متوفرة"
-4. اذكر أسماء المنتجات والأسعار عند التوصية
-5. كن مفيداً وودوداً
+3. إذا لم تجد معلومة محددة، قل "هذه المعلومة غير متوفرة" بطريقة ودودة
+4. اذكر أسماء المنتجات والأسعار عند التوصية مع إظهار الحماس
+5. تأكد من إدراج الرابط إذا كان متوفراً للمنتج
+6. ابدأ إجاباتك بترحيب دافئ واختتمها بعرض مساعدة إضافية
+7. استخدم عبارات مثل "يسعدني أن أساعدك" و "أتمنى أن تنال إعجابك"
+8. اربط إجابتك بالمحادثة السابقة عند الحاجة
 
 سؤال العميل: {question}
 
-إجابتك:
+إجابتك الودودة:
 """)
 
             # Generate response
             chain = prompt | self.llm | StrOutputParser()
+            # Prepare history section
+            history_section = f"محادثة سابقة:\n{conversation_context}" if conversation_context else "بداية محادثة جديدة"
+
             response = chain.invoke({
                 "context": context,
-                "question": query
+                "question": query,
+                "history_section": history_section
             })
 
             return response, search_results

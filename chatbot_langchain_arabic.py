@@ -4,7 +4,7 @@ import json
 from datetime import datetime
 from shared.config import init_apis, TEXT_MODEL
 from shared.langchain_rag import init_langchain_rag
-from shared.embeddings import get_image_description, get_image_category
+from shared.embeddings import get_image_description
 from shared.database import search_by_image  # Keep for image search
 import openai
 
@@ -110,73 +110,161 @@ except Exception as e:
 
 st.title("💎 مساعد متجر المجوهرات")
 
-def is_product_query(message: str) -> bool:
-    """
-    More precise detection of product queries
-    Only search when user is clearly looking for products
-    """
-    message_lower = message.lower()
-
-    # Explicit product requests - these should definitely trigger search
-    explicit_requests = [
-        "أريد", "ابحث", "عندكن", "عندكم", "متوفر", "موجود", "لديكم", "لديكن",
-        "اعرض", "أعرض", "وريني", "أوريني", "اطلب", "أطلب"
-    ]
-
-    # Product names - only search if mentioned
-    product_names = [
-        "خاتم", "خواتم", "عقد", "عقود", "قلادة", "قلائد",
-        "سلسلة", "سلاسل", "سلسال", "أقراط", "قرط",
-        "سوار", "أساور", "اسورة", "دبوس", "دبابيس", "طقم", "أطقم"
-    ]
-
-    # Materials with intent words
-    material_queries = [
-        "ذهب", "ذهبي", "ذهبية", "فضة", "فضي", "فضية",
-        "ماس", "ألماس", "لؤلؤ"
-    ]
-
-    # Check for explicit requests
-    has_explicit_request = any(req in message_lower for req in explicit_requests)
-
-    # Check for product names
-    has_product_name = any(product in message_lower for product in product_names)
-
-    # Check for material queries with some context
-    has_material_context = any(material in message_lower for material in material_queries)
-
-    # Product questions with question words
-    question_indicators = ["ما المتوفر", "ماذا عندكم", "ماذا لديكم", "ما عندكن", "ما لديكن"]
-    has_product_question = any(q in message_lower for q in question_indicators)
-
-    # Only trigger search if:
-    # 1. Explicit request OR
-    # 2. Product name mentioned OR
-    # 3. Material mentioned with some context OR
-    # 4. Specific product question
-    return (has_explicit_request or
-            has_product_name or
-            (has_material_context and len(message.split()) > 2) or
-            has_product_question)
-
-def get_general_response(prompt: str) -> str:
-    """Handle general conversation that doesn't require product search"""
+def search_jewelry_products(query: str, conversation_history: list = None) -> str:
+    """Search for jewelry products and return formatted results"""
     try:
+        if st.session_state.rag_system:
+            _, results = st.session_state.rag_system.conversational_search(query, conversation_history)
+
+            if results:
+                # Format results for LLM context
+                products_info = f"تم العثور على {len(results)} منتج في المخزون:\n\n"
+                for i, result in enumerate(results, 1):
+                    metadata = result['metadata']
+                    products_info += f"{i}. {metadata.get('name', 'منتج')}\n"
+                    products_info += f"   السعر: {metadata.get('price', 0):.2f} ريال\n"
+                    products_info += f"   الفئة: {metadata.get('category', 'غير محدد')}\n"
+                    if metadata.get('karat'):
+                        products_info += f"   العيار: {metadata.get('karat')}\n"
+                    if metadata.get('weight', 0) > 0:
+                        products_info += f"   الوزن: {metadata.get('weight')} جرام\n"
+                    if metadata.get('design'):
+                        products_info += f"   التصميم: {metadata.get('design')}\n"
+                    if metadata.get('product_url'):
+                        products_info += f"   الرابط: {metadata.get('product_url')}\n"
+                    products_info += f"   الوصف: {metadata.get('description', '')[:150]}...\n\n"
+
+                # Add instruction for LLM
+                products_info += "\nتعليمات: تحدث بأسلوب دافئ ومرحب وودود. اذكر هذه المنتجات في إجابتك مع الأسعار والتفاصيل المهمة. تأكد من إدراج الرابط إذا كان متوفراً. تذكر: أنت تحافظ على سياق المحادثة وتربط إجابتك بما تم مناقشته سابقاً."
+
+                return products_info
+            else:
+                return "أعتذر، لم أجد منتجات تطابق طلبك في مجموعتنا الحالية. لكن لا تقلق! يمكنني مساعدتك في البحث عن شيء آخر أو تقديم اقتراحات بديلة. ما رأيك أن نجرب بحثاً مختلفاً؟ 😊"
+        else:
+            return "نظام البحث غير متاح حالياً."
+
+    except Exception as e:
+        return f"حدث خطأ في البحث: {e}"
+
+def get_ai_response_with_tools(user_message: str, conversation_history: list) -> str:
+    """Get AI response with access to search tools and full conversation context"""
+    try:
+        # Define the search tool
+        search_tool = {
+            "type": "function",
+            "function": {
+                "name": "search_jewelry_products",
+                "description": "Search for jewelry products in the store inventory when customer asks about specific products or wants to see what's available",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query for jewelry products"
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }
+
+        # Build conversation context summary FIRST
+        context_summary = ""
+        if conversation_history:
+            recent_history = conversation_history[-4:] if len(conversation_history) > 4 else conversation_history
+            if recent_history:
+                context_summary = "📋 ملخص المحادثة السابقة:\n"
+                for i, msg in enumerate(recent_history):
+                    if msg["role"] == "user":
+                        context_summary += f"العميل قال: {msg['content']}\n"
+                    elif msg["role"] == "assistant":
+                        context_summary += f"أنت أجبت: {msg['content'][:100]}...\n"
+
+                # Extract key information
+                mentioned_products = []
+                for msg in recent_history:
+                    content = msg['content'].lower()
+                    if any(product in content for product in ['خاتم', 'عقد', 'سلسلة', 'أقراط', 'سوار']):
+                        mentioned_products.append(msg['content'][:150])
+
+                if mentioned_products:
+                    context_summary += f"\n🎯 المنتجات التي تم ذكرها:\n"
+                    for product in mentioned_products[-2:]:  # Last 2 product mentions
+                        context_summary += f"- {product}\n"
+
+        # Prepare messages with CONTEXT FIRST
+        messages = [
+            {
+                "role": "system",
+                "content": f"""أنت مساعد مبيعات ودود في متجر مجوهرات.
+
+{context_summary}
+
+🔗 CRITICAL: إذا سأل العميل عن "السعر" أو "الألوان" أو "متوفر" بدون تحديد المنتج،
+يجب أن تربط السؤال بآخر منتج ذكرته في المحادثة أعلاه.
+
+قواعد أساسية:
+1. راجع المحادثة السابقة أولاً قبل أي شيء
+2. اربط الأسئلة الغامضة بالسياق السابق
+3. لديك أداة بحث للمنتجات الجديدة فقط
+4. لا تخترع معلومات - استخدم فقط ما في البحث أو المحادثة
+5. كن ودوداً ومتحمساً
+
+🎯 مثال: إذا ذكرت خواتم سابقاً وسأل "كم السعر؟" → أجب عن أسعار الخواتم من المحادثة السابقة."""
+            }
+        ]
+
+        # Add recent conversation history
+        recent_history = conversation_history[-3:] if len(conversation_history) > 3 else conversation_history
+        for msg in recent_history:
+            if msg["role"] in ["user", "assistant"]:
+                messages.append({"role": msg["role"], "content": msg["content"]})
+
+        # Add current user message
+        messages.append({"role": "user", "content": user_message})
+
+        # Call OpenAI with function calling
         response = openai.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": """أنت مساعد ودود لمتجر مجوهرات.
-
-                للأسئلة العامة عن المجوهرات (كالعناية، المناسبات، الأنواع)، قدم نصائح مفيدة.
-                للاستفسارات عن منتجات محددة، انصح العميل بأن يسأل عن منتجات معينة ليمكنني البحث في مخزوننا.
-
-                كن مفيداً وودوداً وتحدث بالعربية."""},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=200,
-            temperature=0.7
+            model="gpt-4",
+            messages=messages,
+            tools=[search_tool],
+            tool_choice="auto",  # Let AI decide when to use tools
+            temperature=0.3
         )
-        return response.choices[0].message.content
+
+        response_message = response.choices[0].message
+
+        # Check if AI wants to use the search tool
+        if response_message.tool_calls:
+            for tool_call in response_message.tool_calls:
+                if tool_call.function.name == "search_jewelry_products":
+                    # Extract search query
+                    function_args = json.loads(tool_call.function.arguments)
+                    search_query = function_args.get("query", "")
+
+                    # Perform search
+                    search_result = search_jewelry_products(search_query, conversation_history)
+
+                    # Add tool result to conversation
+                    messages.append(response_message)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": search_result
+                    })
+
+                    # Get final response with search results
+                    final_response = openai.chat.completions.create(
+                        model="gpt-4",
+                        messages=messages,
+                        temperature=0.3
+                    )
+
+                    return final_response.choices[0].message.content
+
+        # No tool call needed, return direct response
+        return response_message.content
+
     except Exception as e:
         return f"عذراً، حدث خطأ: {e}"
 
@@ -258,7 +346,6 @@ elif st.session_state.active_tab == "image":
             with st.spinner("تحليل الصورة والبحث..."):
                 # Analyze the image
                 description = get_image_description(image)
-                category = get_image_category(image)
 
                 # Search for similar products using traditional image search
                 search_results = search_by_image(pinecone_index, image, top_k=5)
@@ -273,22 +360,42 @@ elif st.session_state.active_tab == "image":
                             'metadata': result.metadata
                         })
 
-                # Generate response using RAG
-                analysis_query = f"حلل هذه الصورة: {description}. الفئة المكتشفة: {category}"
-                if st.session_state.rag_system:
-                    bot_response, _ = st.session_state.rag_system.conversational_search(
-                        analysis_query
-                    )
-                else:
-                    bot_response = f"تم تحليل الصورة: {description}\nالفئة: {category}"
+                # Create a specific search query based on image details
+                # Extract key features for better matching
+                search_query = description  # Use the detailed image description directly
+
+                # Use the search tool directly for better matching
+                search_results = search_jewelry_products(search_query, st.session_state.messages)
+
+                # Create analysis prompt with search results
+                analysis_query = f"""لقد رفع العميل صورة لقطعة مجوهرات.
+
+وصف الصورة: {description}
+
+نتائج البحث عن قطع مشابهة:
+{search_results}
+
+قم بتحليل الصورة وعرض القطع المشابهة من نتائج البحث. ركز على القطع الأكثر تشابهاً من ناحية التصميم والمواد والطراز."""
+
+                # Get response without tool calling (since we already searched)
+                response = openai.chat.completions.create(
+                    model="gpt-4",
+                    messages=[
+                        {"role": "system", "content": "أنت مساعد مبيعات ودود في متجر مجوهرات. حلل الصورة واعرض المنتجات المشابهة بحماس."},
+                        {"role": "user", "content": analysis_query}
+                    ],
+                    temperature=0.3
+                )
+                bot_response = response.choices[0].message.content
 
                 # Display results
                 st.markdown(bot_response)
 
-                if formatted_results:
-                    display_products(formatted_results)
-                else:
-                    st.info("لم يتم العثور على منتجات مشابهة")
+                # Product cards disabled - all info in conversational text
+                # if formatted_results:
+                #     display_products(formatted_results)
+                # else:
+                #     st.info("لم يتم العثور على منتجات مشابهة")
 
                 # Add to chat history
                 st.session_state.messages.append({
@@ -315,13 +422,8 @@ if st.session_state.active_tab == "chat":
             thinking_placeholder = st.empty()
             thinking_placeholder.markdown("🤔 أفكر...")
 
-            if st.session_state.rag_system and is_product_query(prompt):
-                response, search_results = st.session_state.rag_system.conversational_search(
-                    prompt,
-                    conversation_history=st.session_state.messages
-                )
-            else:
-                response = get_general_response(prompt)
+            # Use function calling approach - ONE LLM call with full context and tools
+            response = get_ai_response_with_tools(prompt, st.session_state.messages)
 
             thinking_placeholder.markdown(response)
 

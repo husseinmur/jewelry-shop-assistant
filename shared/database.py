@@ -1,6 +1,6 @@
 import streamlit as st
 import uuid
-from .embeddings import get_image_description, get_text_embedding, get_image_category
+from .embeddings import get_image_description, get_text_embedding
 
 def store_product(index, image, name, price, category, image_url=None, additional_info="", karat="", weight=0.0, design="", style="", product_url=""):
     """Store a product in Pinecone with embeddings"""
@@ -99,36 +99,15 @@ def search_by_text(index, text_query, top_k=10, min_score=0.3):
         return []
 
 def search_by_image(index, image, top_k=10, min_score=0.5):
-    """Search products by uploaded image using description + category filtering"""
+    """Search products by uploaded image using description (same as text search)"""
     try:
-        # Method 1: Get category from image
-        detected_category = get_image_category(image)
-        st.info(f"🎯 تم تحديد الفئة من الصورة: {detected_category}")
-        
-        # Method 2: Get description and search by text
+        # Get description from image
         description = get_image_description(image)
-        
-        # Get more results to filter by category
-        text_results = search_by_text(index, description, top_k * 3, min_score=0.3)
-        
-        # Filter by detected category first
-        if detected_category != "أخرى":
-            category_filtered = [
-                result for result in text_results 
-                if result.metadata.get('category', '').lower() == detected_category.lower()
-            ]
-            
-            if len(category_filtered) >= 1:
-                st.success(f"✅ تم العثور على {len(category_filtered)} عنصر في فئة {detected_category}")
-                return category_filtered[:top_k]
-            else:
-                # No category matches - don't mix with other categories
-                st.warning(f"⚠️ لم يتم العثور على منتجات في فئة {detected_category}. جرب وصف أكثر تفصيلاً أو أضف منتجات لهذه الفئة.")
-                return []
-        else:
-            # No specific category detected, return general results
-            return text_results[:top_k]
-        
+        st.info(f"🔍 البحث باستخدام: {description[:100]}...")
+
+        # Search by text description - same as text search
+        return search_by_text(index, description, top_k, min_score)
+
     except Exception as e:
         st.error(f"خطأ في البحث بالصورة: {e}")
         return []

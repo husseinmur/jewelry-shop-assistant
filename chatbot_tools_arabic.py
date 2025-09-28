@@ -3,7 +3,7 @@ from PIL import Image
 import json
 from shared.config import init_apis
 from shared.langchain_rag import init_langchain_rag
-from shared.embeddings import get_image_description, get_image_category
+from shared.embeddings import get_image_description
 from shared.database import search_by_image
 import openai
 
@@ -68,11 +68,11 @@ search_tool = {
     }
 }
 
-def search_jewelry_products(query: str) -> str:
+def search_jewelry_products(query: str, conversation_history: list = None) -> str:
     """Search for jewelry products and return formatted results"""
     try:
         if st.session_state.rag_system:
-            _, results = st.session_state.rag_system.conversational_search(query)
+            _, results = st.session_state.rag_system.conversational_search(query, conversation_history)
 
             if results:
                 # Format results for LLM context
@@ -96,11 +96,11 @@ def search_jewelry_products(query: str) -> str:
                 st.session_state.last_search_results = results
 
                 # Add instruction for LLM
-                products_info += "\nتعليمات: اذكر هذه المنتجات في إجابتك مع الأسعار والتفاصيل المهمة. لا تحتاج لعرض كل التفاصيل."
+                products_info += "\nتعليمات: تحدث بأسلوب دافئ ومرحب وودود. اذكر هذه المنتجات في إجابتك مع الأسعار والتفاصيل المهمة. تأكد من إدراج الرابط إذا كان متوفراً. استخدم عبارات ترحيبية وكن متحمساً لمساعدة العميل. تذكر: أنت تحافظ على سياق المحادثة وتربط إجابتك بما تم مناقشته سابقاً."
 
                 return products_info
             else:
-                return "لم يتم العثور على منتجات مطابقة لطلبك في مخزوننا الحالي."
+                return "أعتذر، لم أجد منتجات تطابق طلبك في مجموعتنا الحالية. لكن لا تقلق! يمكنني مساعدتك في البحث عن شيء آخر أو تقديم اقتراحات بديلة. ما رأيك أن نجرب بحثاً مختلفاً؟ 😊"
         else:
             return "نظام البحث غير متاح حالياً."
 
@@ -114,16 +114,24 @@ def get_ai_response_with_tools(user_message: str, conversation_history: list) ->
         messages = [
             {
                 "role": "system",
-                "content": """أنت مساعد مبيعات خبير في متجر مجوهرات.
+                "content": """أنت مساعد مبيعات ودود ومتحمس في متجر مجوهرات! 💎
+
+شخصيتك:
+- مرحب وودود دائماً
+- متحمس لمساعدة العملاء
+- خبير في المجوهرات ومتفهم لاحتياجات العميل
+- تستخدم لغة دافئة ومشجعة
 
 قواعد مهمة:
 1. لديك إمكانية الوصول لأداة البحث في مخزون المتجر
 2. استخدم أداة البحث فقط عندما يطلب العميل منتجات محددة أو يسأل عن المتوفر
 3. للأسئلة العامة عن المجوهرات أو النصائح، أجب مباشرة بدون استخدام الأداة
-4. عندما تحصل على نتائج البحث، اذكر المنتجات في إجابتك بطريقة طبيعية
+4. عندما تحصل على نتائج البحث، اذكر المنتجات في إجابتك بطريقة طبيعية ومتحمسة
 5. اذكر الأسماء والأسعار والتفاصيل المهمة في النص
-6. كن ودوداً ومفيداً في جميع الأوقات
-7. تحدث بالعربية دائماً
+6. ابدأ محادثاتك بترحيب دافئ واختتمها بعرض مساعدة إضافية
+7. تحدث بالعربية دائماً واستخدم عبارات ودودة
+8. 🔗 CRITICAL: تذكر المحادثة السابقة دائماً - راجع الرسائل السابقة واربط إجاباتك بما ناقشناه. إذا سأل عن "السعر" أو "الألوان" بدون تحديد، اربطه بآخر منتج ذكرناه
+9. إذا قال العميل "ما السعر؟" بعد أن تحدثتم عن منتج معين، أجب عن سعر ذلك المنتج تحديداً
 
 إرشاد للعرض:
 - إذا كان العميل يتصفح أو يقارن، أضف: [SHOW_PRODUCTS] في نهاية إجابتك
@@ -139,12 +147,14 @@ def get_ai_response_with_tools(user_message: str, conversation_history: list) ->
 
         # Add conversation history (last 6 messages)
         recent_history = conversation_history[-6:] if len(conversation_history) > 6 else conversation_history
+        st.write(f"🔍 DEBUG: Processing {len(recent_history)} history messages")
         for msg in recent_history:
             if msg["role"] in ["user", "assistant"]:
                 content = msg["content"]
                 if len(content) > 200:
                     content = content[:200] + "..."
                 messages.append({"role": msg["role"], "content": content})
+                st.write(f"📝 Added to context: {msg['role']}: {content[:50]}...")
 
         # Add current user message
         messages.append({"role": "user", "content": user_message})
@@ -170,7 +180,7 @@ def get_ai_response_with_tools(user_message: str, conversation_history: list) ->
                     search_query = function_args.get("query", "")
 
                     # Perform search
-                    search_result = search_jewelry_products(search_query)
+                    search_result = search_jewelry_products(search_query, conversation_history)
 
                     # Add tool result to conversation
                     messages.append(response_message)
@@ -273,7 +283,6 @@ if uploaded_image:
     if st.button("🔍 تحليل الصورة"):
         with st.spinner("تحليل الصورة..."):
             description = get_image_description(image)
-            category = get_image_category(image)
             search_results = search_by_image(pinecone_index, image, top_k=5)
 
             formatted_results = []
@@ -285,7 +294,7 @@ if uploaded_image:
                         'metadata': result.metadata
                     })
 
-            analysis_query = f"حلل هذه الصورة: {description}. الفئة: {category}"
+            analysis_query = f"حلل هذه الصورة: {description}"
             bot_response, _ = get_ai_response_with_tools(analysis_query, st.session_state.messages)
 
             st.session_state.messages.append({
