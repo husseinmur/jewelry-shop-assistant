@@ -3,9 +3,9 @@ from PIL import Image
 import json
 from datetime import datetime
 from shared.config import init_apis, TEXT_MODEL
-from shared.langchain_rag import init_langchain_rag
+# from shared.langchain_rag import init_langchain_rag  # No longer needed
 from shared.embeddings import get_image_description
-from shared.database import search_by_image  # Keep for image search
+# from shared.database import search_by_image  # No longer needed - using optimized search
 import openai
 
 # Page config
@@ -80,29 +80,20 @@ if "messages" not in st.session_state:
         "content": "مرحباً! كيف يمكنني مساعدتك؟"
     })
 
-if "rag_system" not in st.session_state:
-    st.session_state.rag_system = None
+# RAG system no longer needed - using direct Pinecone + LLM verification
 
 if "active_tab" not in st.session_state:
     st.session_state.active_tab = "chat"
 
 
 
-# Initialize APIs and RAG
+# Initialize APIs only (no RAG system needed)
 try:
     openai_client, pinecone_index = init_apis()
 
-    # Initialize LangChain RAG system
-    if st.session_state.rag_system is None:
-        with st.spinner("تحضير نظام البحث الذكي..."):
-            st.session_state.rag_system = init_langchain_rag(
-                pinecone_index,
-                st.secrets["OPENAI_API_KEY"]
-            )
-
-        if not st.session_state.rag_system:
-            st.error("❌ فشل في تهيئة نظام البحث")
-            st.stop()
+    if not openai_client or not pinecone_index:
+        st.error("❌ فشل في تهيئة نظام البحث")
+        st.stop()
 
 except Exception as e:
     st.error(f"خطأ في الاتصال: {e}")
@@ -110,38 +101,123 @@ except Exception as e:
 
 st.title("💎 مساعد متجر المجوهرات")
 
-def search_jewelry_products(query: str, conversation_history: list = None) -> str:
-    """Search for jewelry products and return formatted results"""
+def llm_filter_results(query: str, results: list, openai_client) -> list:
+    """Use LLM to intelligently filter search results for relevance"""
     try:
-        if st.session_state.rag_system:
-            _, results = st.session_state.rag_system.conversational_search(query, conversation_history)
+        if not results:
+            return []
 
-            if results:
-                # Format results for LLM context
-                products_info = f"تم العثور على {len(results)} منتج في المخزون:\n\n"
-                for i, result in enumerate(results, 1):
-                    metadata = result['metadata']
-                    products_info += f"{i}. {metadata.get('name', 'منتج')}\n"
-                    products_info += f"   السعر: {metadata.get('price', 0):.2f} ريال\n"
-                    products_info += f"   الفئة: {metadata.get('category', 'غير محدد')}\n"
-                    if metadata.get('karat'):
-                        products_info += f"   العيار: {metadata.get('karat')}\n"
-                    if metadata.get('weight', 0) > 0:
-                        products_info += f"   الوزن: {metadata.get('weight')} جرام\n"
-                    if metadata.get('design'):
-                        products_info += f"   التصميم: {metadata.get('design')}\n"
-                    if metadata.get('product_url'):
-                        products_info += f"   الرابط: {metadata.get('product_url')}\n"
-                    products_info += f"   الوصف: {metadata.get('description', '')[:150]}...\n\n"
+        # Format results for verification
+        results_text = ""
+        for i, result in enumerate(results):
+            metadata = result.metadata
+            results_text += f"ID: {result.id}\n"
+            results_text += f"Name: {metadata.get('name', 'N/A')}\n"
+            results_text += f"Category: {metadata.get('category', 'N/A')}\n"
+            results_text += f"Description: {metadata.get('description', 'N/A')[:100]}...\n"
+            results_text += f"Score: {result.score:.3f}\n\n"
 
-                # Add instruction for LLM
-                products_info += "\nتعليمات: تحدث بأسلوب دافئ ومرحب وودود. اذكر هذه المنتجات في إجابتك مع الأسعار والتفاصيل المهمة. تأكد من إدراج الرابط إذا كان متوفراً. تذكر: أنت تحافظ على سياق المحادثة وتربط إجابتك بما تم مناقشته سابقاً."
+        verification_prompt = f"""
+Query: "{query}"
 
-                return products_info
-            else:
-                return "أعتذر، لم أجد منتجات تطابق طلبك في مجموعتنا الحالية. لكن لا تقلق! يمكنني مساعدتك في البحث عن شيء آخر أو تقديم اقتراحات بديلة. ما رأيك أن نجرب بحثاً مختلفاً؟ 😊"
-        else:
+Available products to evaluate:
+{results_text}
+
+Task: Return only the product IDs that truly match the search query.
+
+Rules:
+- If query is "خاتم ذهب" (gold ring), only return actual gold rings
+- If query is "سلسلة بسيطة" (simple necklace), only return simple/minimalist necklaces
+- If query is "مجوهرات غالية" (expensive jewelry), return high-priced items
+- Consider both name, category, and description for matching
+- If NO products truly match the query intent, return empty list
+- Only return products that a customer would actually want for this search
+
+Return ONLY a JSON list of product IDs, nothing else: ["id1", "id2", "id3"] or []
+"""
+
+        response = openai_client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "user", "content": verification_prompt}],
+            temperature=0.1,
+            max_tokens=500  # Increased for longer UUID lists
+        )
+
+        # Parse response to get filtered IDs
+        response_text = response.choices[0].message.content.strip()
+        try:
+            import json
+            filtered_ids = json.loads(response_text)
+            if not isinstance(filtered_ids, list):
+                filtered_ids = []
+        except:
+            filtered_ids = []
+
+        # Filter original results by verified IDs
+        filtered_results = [r for r in results if r.id in filtered_ids]
+        return filtered_results
+
+    except Exception as e:
+        st.error(f"Error in LLM filtering: {e}")
+        # Fallback to similarity filtering
+        return [r for r in results if r.score >= 0.4][:5]
+
+def search_jewelry_products(query: str, conversation_history: list = None) -> str:
+    """Search for jewelry products using direct Pinecone + LLM verification"""
+    try:
+        if not pinecone_index:
             return "نظام البحث غير متاح حالياً."
+
+        # Get text embedding for the query
+        from shared.embeddings import get_text_embedding
+        query_embedding = get_text_embedding(query)
+
+        if not query_embedding:
+            return "فشل في معالجة الاستعلام."
+
+        # Search Pinecone directly
+        pinecone_results = pinecone_index.query(
+            vector=query_embedding,
+            top_k=15,  # Get more candidates for filtering
+            include_metadata=True
+        )
+
+        # Basic similarity filter first (fast)
+        decent_results = [r for r in pinecone_results.matches if r.score >= 0.3]
+
+        if not decent_results:
+            return "أعتذر، لم أجد منتجات تطابق طلبك في مجموعتنا الحالية. لكن لا تقلق! يمكنني مساعدتك في البحث عن شيء آخر أو تقديم اقتراحات بديلة. ما رأيك أن نجرب بحثاً مختلفاً؟ 😊"
+
+        # LLM verification filter (intelligent)
+        filtered_results = llm_filter_results(query, decent_results, openai_client)
+
+        if not filtered_results:
+            return "أعتذر، لم أجد منتجات تطابق طلبك بدقة في مجموعتنا الحالية. لكن لا تقلق! يمكنني مساعدتك في البحث عن شيء آخر أو تقديم اقتراحات بديلة. ما رأيك أن نجرب بحثاً مختلفاً؟ 😊"
+
+        # Format results for LLM context
+        final_results = filtered_results[:5]  # Top 5 verified results
+        products_info = f"تم العثور على {len(final_results)} منتج مطابق في المخزون:\n\n"
+
+        for i, result in enumerate(final_results, 1):
+            metadata = result.metadata
+            products_info += f"{i}. {metadata.get('name', 'منتج')}\n"
+            products_info += f"   السعر: {metadata.get('price', 0):.2f} ريال\n"
+            products_info += f"   الفئة: {metadata.get('category', 'غير محدد')}\n"
+            if metadata.get('karat'):
+                products_info += f"   العيار: {metadata.get('karat')}\n"
+            if metadata.get('weight', 0) > 0:
+                products_info += f"   الوزن: {metadata.get('weight')} جرام\n"
+            if metadata.get('design'):
+                products_info += f"   التصميم: {metadata.get('design')}\n"
+            if metadata.get('product_url'):
+                products_info += f"   الرابط: {metadata.get('product_url')}\n"
+            products_info += f"   الوصف: {metadata.get('description', '')[:150]}...\n"
+            products_info += f"   مستوى التطابق: {result.score * 100:.1f}%\n\n"
+
+        # Add instruction for LLM
+        products_info += "\nتعليمات: تحدث بأسلوب دافئ ومرحب وودود. اذكر هذه المنتجات في إجابتك مع الأسعار والتفاصيل المهمة. تأكد من إدراج الرابط إذا كان متوفراً. تذكر: أنت تحافظ على سياق المحادثة وتربط إجابتك بما تم مناقشته سابقاً."
+
+        return products_info
 
     except Exception as e:
         return f"حدث خطأ في البحث: {e}"
@@ -346,26 +422,10 @@ elif st.session_state.active_tab == "image":
             with st.spinner("تحليل الصورة والبحث..."):
                 # Analyze the image
                 description = get_image_description(image)
+                st.info(f"🔍 تحليل الصورة: {description[:100]}...")
 
-                # Search for similar products using traditional image search
-                search_results = search_by_image(pinecone_index, image, top_k=5)
-
-                # Convert results to our format for display
-                formatted_results = []
-                if search_results:
-                    for result in search_results:
-                        formatted_results.append({
-                            'id': result.id,
-                            'score': result.score,
-                            'metadata': result.metadata
-                        })
-
-                # Create a specific search query based on image details
-                # Extract key features for better matching
-                search_query = description  # Use the detailed image description directly
-
-                # Use the search tool directly for better matching
-                search_results = search_jewelry_products(search_query, st.session_state.messages)
+                # Use optimized search with image description
+                search_results = search_jewelry_products(description, st.session_state.messages)
 
                 # Create analysis prompt with search results
                 analysis_query = f"""لقد رفع العميل صورة لقطعة مجوهرات.
@@ -391,12 +451,6 @@ elif st.session_state.active_tab == "image":
                 # Display results
                 st.markdown(bot_response)
 
-                # Product cards disabled - all info in conversational text
-                # if formatted_results:
-                #     display_products(formatted_results)
-                # else:
-                #     st.info("لم يتم العثور على منتجات مشابهة")
-
                 # Add to chat history
                 st.session_state.messages.append({
                     "role": "user",
@@ -404,8 +458,7 @@ elif st.session_state.active_tab == "image":
                 })
                 st.session_state.messages.append({
                     "role": "assistant",
-                    "content": bot_response,
-                    "products": formatted_results if formatted_results else None
+                    "content": bot_response
                 })
     else:
         st.info("اختر صورة")
