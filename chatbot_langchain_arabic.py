@@ -123,44 +123,75 @@ Query: "{query}"
 Available products to evaluate:
 {results_text}
 
-Task: Return only the product IDs that truly match the search query.
+Task: Return product IDs that would satisfy the customer's search intent.
 
-Rules:
-- If query is "خاتم ذهب" (gold ring), only return actual gold rings
-- If query is "سلسلة بسيطة" (simple necklace), only return simple/minimalist necklaces
-- If query is "مجوهرات غالية" (expensive jewelry), return high-priced items
-- Consider both name, category, and description for matching
-- If NO products truly match the query intent, return empty list
-- Only return products that a customer would actually want for this search
+IMPORTANT CONTEXT & FLEXIBILITY RULES:
+📿 JEWELRY USE CASES - Understand customer intent:
+- "خاتم خطوبة" (engagement ring) = elegant rings with stones, gold, suitable for proposals
+- "خاتم زواج" (wedding ring) = classic rings, bands, gold/platinum, suitable for marriage
+- "خاتم بسيط" (simple ring) = minimal design, clean lines, not overly decorative
+- "عقد فاخر" (luxury necklace) = high-end necklaces, precious materials, sophisticated design
+- "أقراط يومية" (daily earrings) = comfortable, suitable for everyday wear
+- "مجوهرات هدية" (gift jewelry) = presentable pieces, nice packaging appeal
 
-Return ONLY a JSON list of product IDs, nothing else: ["id1", "id2", "id3"] or []
+🎯 MATCHING STRATEGY:
+- Focus on SUITABILITY for the intended use, not exact terminology
+- A beautiful gold ring with stones IS suitable for engagement even if not labeled "engagement ring"
+- A simple gold band IS suitable for wedding even if not labeled "wedding ring"
+- Consider material, design style, and appropriateness for the occasion
+
+💎 MATERIAL & STYLE UNDERSTANDING:
+- "ذهب" includes all gold types (yellow, white, rose gold)
+- "بسيط" means clean, minimal, not overly decorative
+- "فاخر" means luxury materials, sophisticated design, higher quality
+- "أنيق" means elegant, refined, sophisticated
+
+✅ EXAMPLES:
+Query: "خاتم خطوبة" → Return: elegant rings with stones, gold rings suitable for proposals
+Query: "سلسلة بسيطة" → Return: minimal necklaces, clean design chains
+Query: "أقراط ذهب" → Return: any gold earrings regardless of specific style
+
+❌ ONLY EXCLUDE if products are completely wrong category or material
+- Query: "خاتم" (ring) → Don't return necklaces or earrings
+- Query: "ذهب" (gold) → Don't return silver-only items
+
+Return ONLY a JSON list of product IDs that match the customer's intent: ["id1", "id2", "id3"] or []
 """
 
         response = openai_client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-5-nano-2025-08-07",
             messages=[{"role": "user", "content": verification_prompt}],
-            temperature=0.1,
-            max_tokens=500  # Increased for longer UUID lists
+            temperature=1.0,
+            max_completion_tokens=2000
         )
 
         # Parse response to get filtered IDs
         response_text = response.choices[0].message.content.strip()
+        print(f"🐛 DEBUG LLM Response: '{response_text}' (length: {len(response_text)})")
         try:
             import json
             filtered_ids = json.loads(response_text)
             if not isinstance(filtered_ids, list):
+                print(f"🐛 DEBUG - Response not a list: {type(filtered_ids)}")
                 filtered_ids = []
-        except:
+            else:
+                print(f"🐛 DEBUG - Parsed {len(filtered_ids)} IDs successfully")
+        except Exception as e:
+            print(f"🐛 DEBUG - JSON parsing failed: {e}")
             filtered_ids = []
 
         # Filter original results by verified IDs
         filtered_results = [r for r in results if r.id in filtered_ids]
+        print(f"🐛 DEBUG LLM Filter - Input: {len(results)}, LLM IDs: {len(filtered_ids)}, Output: {len(filtered_results)}")
         return filtered_results
 
     except Exception as e:
+        print(f"🐛 DEBUG LLM Filter - Exception: {e}")
         st.error(f"Error in LLM filtering: {e}")
         # Fallback to similarity filtering
-        return [r for r in results if r.score >= 0.4][:5]
+        fallback_results = [r for r in results if r.score >= 0.4][:5]
+        print(f"🐛 DEBUG LLM Filter - Using fallback: {len(fallback_results)} results")
+        return fallback_results
 
 def search_jewelry_products(query: str, conversation_history: list = None) -> str:
     """Search for jewelry products using direct Pinecone + LLM verification"""
@@ -178,7 +209,7 @@ def search_jewelry_products(query: str, conversation_history: list = None) -> st
         # Search Pinecone directly
         pinecone_results = pinecone_index.query(
             vector=query_embedding,
-            top_k=15,  # Get more candidates for filtering
+            top_k=8,  # Reduced from 15 to avoid overwhelming LLM
             include_metadata=True
         )
 
@@ -186,13 +217,13 @@ def search_jewelry_products(query: str, conversation_history: list = None) -> st
         decent_results = [r for r in pinecone_results.matches if r.score >= 0.3]
 
         if not decent_results:
-            return "أعتذر، لم أجد منتجات تطابق طلبك في مجموعتنا الحالية. لكن لا تقلق! يمكنني مساعدتك في البحث عن شيء آخر أو تقديم اقتراحات بديلة. ما رأيك أن نجرب بحثاً مختلفاً؟ 😊"
+            return "NO_RESULTS_NEED_CLARIFICATION"
 
         # LLM verification filter (intelligent)
         filtered_results = llm_filter_results(query, decent_results, openai_client)
 
         if not filtered_results:
-            return "أعتذر، لم أجد منتجات تطابق طلبك بدقة في مجموعتنا الحالية. لكن لا تقلق! يمكنني مساعدتك في البحث عن شيء آخر أو تقديم اقتراحات بديلة. ما رأيك أن نجرب بحثاً مختلفاً؟ 😊"
+            return "NO_RESULTS_NEED_CLARIFICATION"
 
         # Format results for LLM context
         final_results = filtered_results[:5]  # Top 5 verified results
@@ -222,6 +253,54 @@ def search_jewelry_products(query: str, conversation_history: list = None) -> st
     except Exception as e:
         return f"حدث خطأ في البحث: {e}"
 
+def ask_clarifying_questions(reason: str, questions: list) -> str:
+    """Handle clarifying questions for vague queries"""
+    try:
+        response = f"أريد أن أساعدك في العثور على أفضل القطع! 😊\n\n"
+        response += f"{reason}\n\n"
+        response += "لذلك، هل يمكنك مساعدتي ببعض التفاصيل:\n\n"
+
+        for i, question in enumerate(questions, 1):
+            response += f"{i}. {question}\n"
+
+        response += f"\nبهذه الطريقة سأتمكن من عرض أفضل القطع التي تناسب ذوقك تماماً! ✨"
+
+        return response
+
+    except Exception as e:
+        return f"عذراً، حدث خطأ: {e}"
+
+def get_ai_response_for_image_search(image_description: str, conversation_history: list) -> str:
+    """Special function for image search that doesn't ask clarifying questions"""
+    try:
+        # Get OpenAI client
+        openai_client, pinecone_index = init_apis()
+
+        # Search for products based on image description
+        search_result = search_jewelry_products(image_description, conversation_history)
+
+        # If no results found, return appropriate message for image search
+        if search_result == "NO_RESULTS_NEED_CLARIFICATION":
+            return "لم أتمكن من العثور على قطع مشابهة للصورة التي رفعتها في مجموعتنا الحالية. 😔\n\nيمكنك تجربة:\n• رفع صورة أخرى أو بزاوية مختلفة\n• وصف القطعة التي تبحث عنها نصياً\n• تصفح مجموعتنا للعثور على قطع مشابهة 💎"
+
+        # If results found, create response
+        image_query = f"وصف الصورة: {image_description}\n\nنتائج البحث:\n{search_result}"
+
+        # Create simple response for image analysis
+        response = openai_client.chat.completions.create(
+            model="gpt-5-nano-2025-08-07",
+            messages=[
+                {"role": "system", "content": "أنت مساعد مبيعات ودود في متجر مجوهرات. حلل الصورة المرفوعة واعرض المنتجات المشابهة بحماس. اذكر التشابه في التصميم أو المواد أو الطراز. كن ودود ومتحمس."},
+                {"role": "user", "content": image_query}
+            ],
+            temperature=1.0
+        )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
+        return f"عذراً، حدث خطأ في تحليل الصورة: {e}"
+
 def get_ai_response_with_tools(user_message: str, conversation_history: list) -> str:
     """Get AI response with access to search tools and full conversation context"""
     try:
@@ -244,13 +323,37 @@ def get_ai_response_with_tools(user_message: str, conversation_history: list) ->
             }
         }
 
+        # Define the clarification tool
+        ask_clarification_tool = {
+            "type": "function",
+            "function": {
+                "name": "ask_clarifying_questions",
+                "description": "Ask clarifying questions when the customer's request is too vague or lacks important details for a good search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {
+                            "type": "string",
+                            "description": "Why clarification is needed"
+                        },
+                        "questions": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "List of clarifying questions to ask"
+                        }
+                    },
+                    "required": ["reason", "questions"]
+                }
+            }
+        }
+
         # Build conversation context summary FIRST
         context_summary = ""
         if conversation_history:
             recent_history = conversation_history[-4:] if len(conversation_history) > 4 else conversation_history
             if recent_history:
                 context_summary = "📋 ملخص المحادثة السابقة:\n"
-                for i, msg in enumerate(recent_history):
+                for msg in recent_history:
                     if msg["role"] == "user":
                         context_summary += f"العميل قال: {msg['content']}\n"
                     elif msg["role"] == "assistant":
@@ -272,7 +375,7 @@ def get_ai_response_with_tools(user_message: str, conversation_history: list) ->
         messages = [
             {
                 "role": "system",
-                "content": f"""أنت مساعد مبيعات ودود في متجر مجوهرات.
+                "content": f"""أنت مساعد مبيعات ذكي وودود في متجر مجوهرات.
 
 {context_summary}
 
@@ -282,9 +385,47 @@ def get_ai_response_with_tools(user_message: str, conversation_history: list) ->
 قواعد أساسية:
 1. راجع المحادثة السابقة أولاً قبل أي شيء
 2. اربط الأسئلة الغامضة بالسياق السابق
-3. لديك أداة بحث للمنتجات الجديدة فقط
+3. لديك أداتان مهمتان:
+   - search_jewelry_products: للبحث عن منتجات محددة
+   - ask_clarifying_questions: لطرح أسئلة توضيحية عند الحاجة
 4. لا تخترع معلومات - استخدم فقط ما في البحث أو المحادثة
 5. كن ودوداً ومتحمساً
+
+🤔 متى تطرح أسئلة توضيحية:
+
+🚨 ASK CLARIFICATION for these vague cases:
+- "jewelry" or "مجوهرات" ALONE (no type at all)
+- "gift" or "هدية" ALONE (no details at all)
+- "something nice" or "شيء جميل" (completely vague)
+- "ring" or "خاتم" ALONE (type only, needs material/style/occasion)
+- "necklace" or "عقد" ALONE (type only, needs material/style)
+- "earrings" or "أقراط" ALONE (type only, needs material/style)
+
+✅ SEARCH DIRECTLY - These have enough specificity:
+✅ "gold ring" → SEARCH (type + material)
+✅ "خاتم ذهب" → SEARCH (type + material)
+✅ "silver earrings" → SEARCH (type + material)
+✅ "أقراط فضة" → SEARCH (type + material)
+✅ "simple necklace" → SEARCH (type + style)
+✅ "عقد بسيط" → SEARCH (type + style)
+✅ "wedding ring" → SEARCH (type + occasion)
+✅ "خاتم زواج" → SEARCH (type + occasion)
+✅ "engagement ring" → SEARCH (type + occasion)
+✅ "خاتم خطوبة" → SEARCH (type + occasion)
+
+❓ ASK CLARIFICATION:
+❓ "ring" → ASK (needs material/style/occasion)
+❓ "خاتم" → ASK (needs material/style/occasion)
+❓ "necklace" → ASK (needs material/style)
+❓ "عقد" → ASK (needs material/style)
+❓ "jewelry" → ASK (no type specified)
+❓ "مجوهرات" → ASK (no type specified)
+❓ "gift" → ASK (no details at all)
+❓ "هدية" → ASK (no details at all)
+
+🎯 Key Rule: Customer needs TYPE + at least ONE additional detail (material/style/occasion) to search!
+
+⚠️ CRITICAL: If customer says ONLY "ring", "خاتم", "necklace", "عقد", "earrings", or "أقراط" without any additional details, you MUST use ask_clarifying_questions tool!
 
 🎯 مثال: إذا ذكرت خواتم سابقاً وسأل "كم السعر؟" → أجب عن أسعار الخواتم من المحادثة السابقة."""
             }
@@ -301,25 +442,40 @@ def get_ai_response_with_tools(user_message: str, conversation_history: list) ->
 
         # Call OpenAI with function calling
         response = openai.chat.completions.create(
-            model="gpt-4",
+            model="gpt-5-nano-2025-08-07",
             messages=messages,
-            tools=[search_tool],
+            tools=[search_tool, ask_clarification_tool],
             tool_choice="auto",  # Let AI decide when to use tools
-            temperature=0.3
+            temperature=1.0
         )
 
         response_message = response.choices[0].message
 
-        # Check if AI wants to use the search tool
+        # Check if AI wants to use tools
         if response_message.tool_calls:
             for tool_call in response_message.tool_calls:
+                function_args = json.loads(tool_call.function.arguments)
+
                 if tool_call.function.name == "search_jewelry_products":
                     # Extract search query
-                    function_args = json.loads(tool_call.function.arguments)
                     search_query = function_args.get("query", "")
 
                     # Perform search
                     search_result = search_jewelry_products(search_query, conversation_history)
+
+                    # Check if search failed and needs clarification
+                    if search_result == "NO_RESULTS_NEED_CLARIFICATION":
+                        # Automatically trigger clarification instead of showing failure
+                        default_questions = [
+                            "ما نوع المجوهرات التي تبحث عنها؟ (خاتم، عقد، أقراط، سوار)",
+                            "ما المناسبة؟ (زواج، خطوبة، هدية، استعمال يومي)",
+                            "ما المادة المفضلة؟ (ذهب، فضة، أحجار كريمة)",
+                            "ما النمط المفضل؟ (بسيط، فاخر، عصري، كلاسيكي)"
+                        ]
+                        return ask_clarifying_questions(
+                            "أريد أن أساعدك في العثور على القطعة المثالية! 💎",
+                            default_questions
+                        )
 
                     # Add tool result to conversation
                     messages.append(response_message)
@@ -331,12 +487,22 @@ def get_ai_response_with_tools(user_message: str, conversation_history: list) ->
 
                     # Get final response with search results
                     final_response = openai.chat.completions.create(
-                        model="gpt-4",
+                        model="gpt-5-nano-2025-08-07",
                         messages=messages,
-                        temperature=0.3
+                        temperature=1.0
                     )
 
                     return final_response.choices[0].message.content
+
+                elif tool_call.function.name == "ask_clarifying_questions":
+                    # Extract clarification parameters
+                    reason = function_args.get("reason", "")
+                    questions = function_args.get("questions", [])
+
+                    # Generate clarification response
+                    clarification_result = ask_clarifying_questions(reason, questions)
+
+                    return clarification_result
 
         # No tool call needed, return direct response
         return response_message.content
@@ -424,29 +590,8 @@ elif st.session_state.active_tab == "image":
                 description = get_image_description(image)
                 st.info(f"🔍 تحليل الصورة: {description[:100]}...")
 
-                # Use optimized search with image description
-                search_results = search_jewelry_products(description, st.session_state.messages)
-
-                # Create analysis prompt with search results
-                analysis_query = f"""لقد رفع العميل صورة لقطعة مجوهرات.
-
-وصف الصورة: {description}
-
-نتائج البحث عن قطع مشابهة:
-{search_results}
-
-قم بتحليل الصورة وعرض القطع المشابهة من نتائج البحث. ركز على القطع الأكثر تشابهاً من ناحية التصميم والمواد والطراز."""
-
-                # Get response without tool calling (since we already searched)
-                response = openai.chat.completions.create(
-                    model="gpt-4",
-                    messages=[
-                        {"role": "system", "content": "أنت مساعد مبيعات ودود في متجر مجوهرات. حلل الصورة واعرض المنتجات المشابهة بحماس."},
-                        {"role": "user", "content": analysis_query}
-                    ],
-                    temperature=0.3
-                )
-                bot_response = response.choices[0].message.content
+                # Use specialized image search function
+                bot_response = get_ai_response_for_image_search(description, st.session_state.messages)
 
                 # Display results
                 st.markdown(bot_response)
