@@ -72,7 +72,7 @@ def get_image_description(image):
                     ]
                 }
             ],
-            max_tokens=300
+            # max_tokens=300
         )
         
         return response.choices[0].message.content
@@ -162,8 +162,8 @@ def expand_search_query(query):
                     "content": f"وسّع هذا البحث عن المجوهرات: '{query}'"
                 }
             ],
-            max_tokens=150,
-            temperature=0
+            # max_tokens=150,
+            temperature=1.0
         )
         
         return response.choices[0].message.content

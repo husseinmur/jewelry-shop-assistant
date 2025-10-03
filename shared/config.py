@@ -30,8 +30,8 @@ def init_apis():
 
 # Constants
 EMBEDDING_MODEL = "text-embedding-ada-002"
-VISION_MODEL = "gpt-4o"
-TEXT_MODEL = "gpt-4"
+VISION_MODEL = "gpt-5-nano-2025-08-07"
+TEXT_MODEL = "gpt-5-nano-2025-08-07"
 
 # Image processing settings
 MAX_IMAGE_SIZE = (800, 800)
