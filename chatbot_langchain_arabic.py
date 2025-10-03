@@ -101,6 +101,39 @@ except Exception as e:
 
 st.title("💎 مساعد متجر المجوهرات")
 
+def category_based_filter(query: str, results: list) -> list:
+    """Simple category-based filtering as fallback when LLM fails"""
+    try:
+        # Determine expected category from query
+        expected_category = None
+        query_lower = query.lower()
+
+        if "خاتم" in query_lower:
+            expected_category = "خواتم"
+        elif "عقد" in query_lower or "سلسلة" in query_lower or "سلسال" in query_lower:
+            expected_category = "عقود"
+        elif "أقراط" in query_lower or "قرط" in query_lower:
+            expected_category = "أقراط"
+        elif "سوار" in query_lower or "أساور" in query_lower:
+            expected_category = "أساور"
+        elif "دبوس" in query_lower or "دبابيس" in query_lower:
+            expected_category = "دبابيس"
+        elif "طقم" in query_lower or "أطقم" in query_lower:
+            expected_category = "طقم"
+
+        # If specific category detected, filter by it
+        if expected_category:
+            filtered = [r for r in results if r.metadata.get('category') == expected_category]
+            if filtered:
+                return filtered[:5]  # Top 5 in correct category
+
+        # Otherwise return top results by similarity
+        return results[:5]
+
+    except Exception as e:
+        print(f"Category filtering error: {e}")
+        return results[:5]
+
 def llm_filter_results(query: str, results: list, openai_client) -> list:
     """Use LLM to intelligently filter search results for relevance"""
     try:
@@ -120,77 +153,49 @@ def llm_filter_results(query: str, results: list, openai_client) -> list:
         verification_prompt = f"""
 Query: "{query}"
 
-Available products to evaluate:
+Products:
 {results_text}
 
-Task: Return product IDs that would satisfy the customer's search intent.
+Rules:
+- خاتم queries → only خواتم category
+- عقد queries → only عقود category
+- أقراط queries → only أقراط category
+- أساور queries → only أساور category
 
-IMPORTANT CONTEXT & FLEXIBILITY RULES:
-📿 JEWELRY USE CASES - Understand customer intent:
-- "خاتم خطوبة" (engagement ring) = elegant rings with stones, gold, suitable for proposals
-- "خاتم زواج" (wedding ring) = classic rings, bands, gold/platinum, suitable for marriage
-- "خاتم بسيط" (simple ring) = minimal design, clean lines, not overly decorative
-- "عقد فاخر" (luxury necklace) = high-end necklaces, precious materials, sophisticated design
-- "أقراط يومية" (daily earrings) = comfortable, suitable for everyday wear
-- "مجوهرات هدية" (gift jewelry) = presentable pieces, nice packaging appeal
-
-🎯 MATCHING STRATEGY:
-- Focus on SUITABILITY for the intended use, not exact terminology
-- A beautiful gold ring with stones IS suitable for engagement even if not labeled "engagement ring"
-- A simple gold band IS suitable for wedding even if not labeled "wedding ring"
-- Consider material, design style, and appropriateness for the occasion
-
-💎 MATERIAL & STYLE UNDERSTANDING:
-- "ذهب" includes all gold types (yellow, white, rose gold)
-- "بسيط" means clean, minimal, not overly decorative
-- "فاخر" means luxury materials, sophisticated design, higher quality
-- "أنيق" means elegant, refined, sophisticated
-
-✅ EXAMPLES:
-Query: "خاتم خطوبة" → Return: elegant rings with stones, gold rings suitable for proposals
-Query: "سلسلة بسيطة" → Return: minimal necklaces, clean design chains
-Query: "أقراط ذهب" → Return: any gold earrings regardless of specific style
-
-❌ ONLY EXCLUDE if products are completely wrong category or material
-- Query: "خاتم" (ring) → Don't return necklaces or earrings
-- Query: "ذهب" (gold) → Don't return silver-only items
-
-Return ONLY a JSON list of product IDs that match the customer's intent: ["id1", "id2", "id3"] or []
+Return JSON list of matching product IDs: ["id1", "id2"] or []
 """
 
         response = openai_client.chat.completions.create(
             model="gpt-5-nano-2025-08-07",
             messages=[{"role": "user", "content": verification_prompt}],
-            temperature=1.0,
             max_completion_tokens=2000
         )
 
         # Parse response to get filtered IDs
         response_text = response.choices[0].message.content.strip()
-        print(f"🐛 DEBUG LLM Response: '{response_text}' (length: {len(response_text)})")
+
+        # If LLM returned empty response, use category-based fallback
+        if not response_text:
+            print("LLM verification failed, using category-based fallback")
+            return category_based_filter(query, results)
+
         try:
             import json
             filtered_ids = json.loads(response_text)
             if not isinstance(filtered_ids, list):
-                print(f"🐛 DEBUG - Response not a list: {type(filtered_ids)}")
                 filtered_ids = []
-            else:
-                print(f"🐛 DEBUG - Parsed {len(filtered_ids)} IDs successfully")
         except Exception as e:
-            print(f"🐛 DEBUG - JSON parsing failed: {e}")
-            filtered_ids = []
+            print(f"JSON parsing failed: {e}, using category-based fallback")
+            return category_based_filter(query, results)
 
         # Filter original results by verified IDs
         filtered_results = [r for r in results if r.id in filtered_ids]
-        print(f"🐛 DEBUG LLM Filter - Input: {len(results)}, LLM IDs: {len(filtered_ids)}, Output: {len(filtered_results)}")
         return filtered_results
 
     except Exception as e:
-        print(f"🐛 DEBUG LLM Filter - Exception: {e}")
         st.error(f"Error in LLM filtering: {e}")
         # Fallback to similarity filtering
         fallback_results = [r for r in results if r.score >= 0.4][:5]
-        print(f"🐛 DEBUG LLM Filter - Using fallback: {len(fallback_results)} results")
         return fallback_results
 
 def search_jewelry_products(query: str, conversation_history: list = None) -> str:
@@ -271,15 +276,21 @@ def ask_clarifying_questions(reason: str, questions: list) -> str:
         return f"عذراً، حدث خطأ: {e}"
 
 def get_ai_response_for_image_search(image_description: str, conversation_history: list) -> str:
-    """Special function for image search that doesn't ask clarifying questions"""
+    """Special function for image search with fallback strategies"""
     try:
         # Get OpenAI client
         openai_client, pinecone_index = init_apis()
 
-        # Search for products based on image description
+        # Try multiple search strategies
         search_result = search_jewelry_products(image_description, conversation_history)
 
-        # If no results found, return appropriate message for image search
+        # If no results found, try simplified search
+        if search_result == "NO_RESULTS_NEED_CLARIFICATION":
+            # Create simplified version for backward compatibility
+            simplified_query = simplify_image_description(image_description, openai_client)
+            search_result = search_jewelry_products(simplified_query, conversation_history)
+
+        # If still no results, return appropriate message
         if search_result == "NO_RESULTS_NEED_CLARIFICATION":
             return "لم أتمكن من العثور على قطع مشابهة للصورة التي رفعتها في مجموعتنا الحالية. 😔\n\nيمكنك تجربة:\n• رفع صورة أخرى أو بزاوية مختلفة\n• وصف القطعة التي تبحث عنها نصياً\n• تصفح مجموعتنا للعثور على قطع مشابهة 💎"
 
@@ -290,16 +301,64 @@ def get_ai_response_for_image_search(image_description: str, conversation_histor
         response = openai_client.chat.completions.create(
             model="gpt-5-nano-2025-08-07",
             messages=[
-                {"role": "system", "content": "أنت مساعد مبيعات ودود في متجر مجوهرات. حلل الصورة المرفوعة واعرض المنتجات المشابهة بحماس. اذكر التشابه في التصميم أو المواد أو الطراز. كن ودود ومتحمس."},
+                {"role": "system", "content": "أنت مساعد مبيعات ودود في متجر مجوهرات. حلل الصورة المرفوعة واعرض المنتجات المشابهة بحماس. اذكر التشابه في التصميم أو المواد أو الطراز. كن ودود ومتحمس لكن دقيق في الوصف."},
                 {"role": "user", "content": image_query}
-            ],
-            temperature=1.0
+            ]
         )
 
         return response.choices[0].message.content
 
     except Exception as e:
         return f"عذراً، حدث خطأ في تحليل الصورة: {e}"
+
+def simplify_image_description(detailed_description: str, openai_client) -> str:
+    """Create simplified description for backward compatibility with old database entries"""
+    try:
+        simplification_prompt = f"""
+خذ هذا الوصف المفصل واختصره إلى وصف بسيط يتوافق مع قاعدة البيانات القديمة:
+
+الوصف المفصل:
+{detailed_description}
+
+أخرج وصفاً بسيطاً فقط باستخدام هذا النمط:
+- "عقد ذهب بسيط"
+- "خاتم ذهب بأحجار"
+- "أقراط فضة كلاسيكية"
+
+ركز على: النوع + المادة + الستايل البسيط
+أجب باللغة العربية فقط بجملة واحدة قصيرة.
+"""
+
+        response = openai_client.chat.completions.create(
+            model="gpt-5-nano-2025-08-07",
+            messages=[{"role": "user", "content": simplification_prompt}]
+        )
+
+        simplified = response.choices[0].message.content.strip()
+        return simplified
+
+    except Exception:
+        # Fallback: extract basic info manually
+        description_lower = detailed_description.lower()
+        if "عقد" in description_lower:
+            jewelry_type = "عقد"
+        elif "خاتم" in description_lower:
+            jewelry_type = "خاتم"
+        elif "أقراط" in description_lower:
+            jewelry_type = "أقراط"
+        elif "سوار" in description_lower:
+            jewelry_type = "سوار"
+        else:
+            jewelry_type = "مجوهرات"
+
+        if "ذهب" in description_lower:
+            material = "ذهب"
+        elif "فضة" in description_lower:
+            material = "فضة"
+        else:
+            material = ""
+
+        return f"{jewelry_type} {material}".strip()
 
 def get_ai_response_with_tools(user_message: str, conversation_history: list) -> str:
     """Get AI response with access to search tools and full conversation context"""
@@ -588,7 +647,18 @@ elif st.session_state.active_tab == "image":
             with st.spinner("تحليل الصورة والبحث..."):
                 # Analyze the image
                 description = get_image_description(image)
-                st.info(f"🔍 تحليل الصورة: {description[:100]}...")
+
+                # Enhanced debug logging
+                st.info(f"🔍 وصف الصورة المُولد: {description}")
+
+                # Show a collapsible debug section
+                with st.expander("🔧 معلومات التشخيص (Debug Info)", expanded=False):
+                    st.write("**الوصف الكامل للصورة:**")
+                    st.text(description)
+                    st.write("**إعدادات البحث:**")
+                    st.write("- عتبة التشابه للصور: 0.4")
+                    st.write("- درجة الحرارة للوصف: 0.3")
+                    st.write("- درجة الحرارة للاستجابة: 0.5")
 
                 # Use specialized image search function
                 bot_response = get_ai_response_for_image_search(description, st.session_state.messages)

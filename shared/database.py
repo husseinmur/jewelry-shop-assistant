@@ -98,12 +98,35 @@ def search_by_text(index, text_query, top_k=10, min_score=0.3):
         st.error(f"خطأ في البحث النصي: {e}")
         return []
 
-def search_by_image(index, image, top_k=10, min_score=0.5):
+def search_by_image(index, image, top_k=10, min_score=0.3):
     """Search products by uploaded image using description (same as text search)"""
     try:
         # Get description from image
         description = get_image_description(image)
         st.info(f"🔍 البحث باستخدام: {description[:100]}...")
+
+        # Debug: Show what we're searching for
+        with st.expander("🔍 تفاصيل البحث المتقدمة", expanded=False):
+            st.write("**الوصف المستخدم في البحث:**")
+            st.text(description)
+
+            # Try direct search with lower threshold
+            embedding = get_text_embedding(description)
+            if embedding:
+                raw_results = index.query(
+                    vector=embedding,
+                    top_k=15,
+                    include_metadata=True
+                )
+
+                st.write(f"**نتائج البحث الأولية: {len(raw_results.matches)} نتيجة**")
+                for i, result in enumerate(raw_results.matches[:10], 1):
+                    name = result.metadata.get('name', 'N/A')
+                    score = result.score
+                    desc = result.metadata.get('description', '')[:200]
+                    st.write(f"{i}. **{name}** (تشابه: {score:.3f})")
+                    st.text(f"الوصف: {desc}...")
+                    st.write("---")
 
         # Search by text description - same as text search
         return search_by_text(index, description, top_k, min_score)
